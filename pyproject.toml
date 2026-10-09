@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gloved-hands"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "opencv-python",
+    "torch",
+    "pytorch-lightning>=2.2",
+    "peft",
+    "webdataset>=0.2.86",
+    "wandb",
+    "omegaconf>=2.3",
+    "smplx",
+]
+
+[project.optional-dependencies]
+dev = ["mypy", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "SIM"]
