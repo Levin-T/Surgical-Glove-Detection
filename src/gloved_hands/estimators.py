@@ -42,36 +42,39 @@ class ViewEstimator:
         from wilor.datasets.vitdet_dataset import ViTDetDataset  # HaMeR's crops, without its debug print
 
         bgr = np.ascontiguousarray(image[..., ::-1])  # the detector and HaMeR's crops expect BGR
-        boxes = self.detector(bgr, conf=0.3, verbose=False)[0].boxes
-        best: dict[str, tuple[np.ndarray, float]] = {}
-        for box, label, score in zip(boxes.xyxy.cpu().numpy(), boxes.cls.cpu().numpy(), boxes.conf.cpu().numpy()):
-            side = "right" if label == 1 else "left"
-            if side not in best or score > best[side][1]:
-                best[side] = (box, float(score))
+        best = self._best_boxes(bgr)
         if not best:
             return {}
-
         sides = list(best)
+        boxes = np.stack([best[side][0] for side in sides])
         right = np.array([side == "right" for side in sides], dtype=np.float32)
-        crops = ViTDetDataset(
-            self.hamer.cfg, bgr, np.stack([best[side][0] for side in sides]), right, rescale_factor=2.0
-        )
+
+        # HaMeR on the hand crops; it sees left hands mirrored, as right hands
+        crops = ViTDetDataset(self.hamer.cfg, bgr, boxes, right, rescale_factor=2.0)
         batch = default_collate([crops[i] for i in range(len(sides))])
         out = self.hamer({"img": batch["img"].to(self.device)})
-        keypoints = out["pred_keypoints_2d"].float().cpu().numpy()  # normalised crop coordinates
-        keypoints[..., 0] *= np.where(right > 0, 1.0, -1.0)[:, None]  # left hands were mirrored in the crop
-        keypoints = keypoints * batch["box_size"].numpy()[:, None, None] + batch["box_center"].numpy()[:, None]
+        keypoints = out["pred_keypoints_2d"].float().cpu().numpy()  # (n, 21, 2) in normalised crop coordinates
         mano = {name: value.float().cpu().numpy() for name, value in out["pred_mano_params"].items()}
 
         self.segmenter.set_image(image)
         estimates = {}
         for i, side in enumerate(sides):
-            mirror = np.ones(3) if side == "right" else MIRROR  # HaMeR saw left hands mirrored, as right hands
-            orient = Rotation.from_matrix(mano["global_orient"][i].reshape(3, 3)).as_rotvec() * mirror
-            pose = Rotation.from_matrix(mano["hand_pose"][i].reshape(15, 3, 3)).as_rotvec() * mirror
             box, score = best[side]
+            mirror = np.array([1.0, 1.0]) if side == "right" else np.array([-1.0, 1.0])
+            pixels = keypoints[i] * mirror * batch["box_size"][i].item() + batch["box_center"][i].numpy()
+            rotvec_mirror = np.ones(3) if side == "right" else MIRROR
+            orient = Rotation.from_matrix(mano["global_orient"][i].reshape(3, 3)).as_rotvec() * rotvec_mirror
+            pose = Rotation.from_matrix(mano["hand_pose"][i].reshape(15, 3, 3)).as_rotvec() * rotvec_mirror
             masks, _, _ = self.segmenter.predict(box=box, multimask_output=False)
-            estimates[side] = HandEstimate(
-                score, keypoints[i], masks[0] > 0, orient, pose.reshape(45), mano["betas"][i]
-            )
+            estimates[side] = HandEstimate(score, pixels, masks[0] > 0, orient, pose.reshape(45), mano["betas"][i])
         return estimates
+
+    def _best_boxes(self, bgr: np.ndarray) -> dict[str, tuple[np.ndarray, float]]:
+        """The most confident detector box per side, with its score."""
+        boxes = self.detector(bgr, conf=0.3, verbose=False)[0].boxes
+        best: dict[str, tuple[np.ndarray, float]] = {}
+        for box, label, score in zip(boxes.xyxy.cpu().numpy(), boxes.cls.cpu().numpy(), boxes.conf.cpu().numpy()):
+            side = "right" if label == 1 else "left"  # WiLoR's detector: class 1 is a right hand
+            if side not in best or score > best[side][1]:
+                best[side] = (box, float(score))
+        return best

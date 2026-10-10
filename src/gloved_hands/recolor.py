@@ -21,14 +21,25 @@ class GloveRecolorer:
         suppressed, some gloss. Hue, texture suppression and gloss are sampled per image."""
         weight = mask.astype(np.float32)
         lightness = _lab(image)[..., 0]
-        smooth = cv2.GaussianBlur(lightness * weight, (0, 0), 3) / np.maximum(cv2.GaussianBlur(weight, (0, 0), 3), 1e-6)
-        lightness = lightness + rng.uniform(0.5, 0.9) * (smooth - lightness)  # suppress skin texture
+
+        # suppress skin texture: move towards the lightness blurred within the hand
+        blurred = cv2.GaussianBlur(lightness * weight, (0, 0), 3)
+        coverage = cv2.GaussianBlur(weight, (0, 0), 3)
+        smooth = blurred / np.maximum(coverage, 1e-6)
+        lightness = lightness + rng.uniform(0.5, 0.9) * (smooth - lightness)
+
+        # keep the hand's shading, at the glove's brightness and contrast
         inside = lightness[mask]
         lightness = self.mean[0] + (lightness - inside.mean()) * self.std[0] / max(inside.std(), 1e-3)
+
+        # gloss: brighten the brightest parts further
         highlight = np.clip((lightness - self.mean[0]) / (2 * self.std[0]), 0, 1) ** 2
-        lightness = np.clip(lightness + rng.uniform(0.1, 0.5) * highlight * (100 - lightness), 0, 100)  # gloss
+        lightness = np.clip(lightness + rng.uniform(0.1, 0.5) * highlight * (100 - lightness), 0, 100)
+
+        # the glove's hue, varied a little per image
         a, b = self.mean[1:] + rng.normal(0, 0.5, 2) * self.std[1:]
         glove = _rgb(np.stack([lightness, np.full_like(lightness, a), np.full_like(lightness, b)], -1))
+
         alpha = cv2.GaussianBlur(weight, (0, 0), 1.5)[..., None]  # soft edge
         return np.clip(alpha * glove + (1 - alpha) * image, 0, 255).astype(np.uint8)
 

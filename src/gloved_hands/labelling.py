@@ -127,19 +127,24 @@ class Labeller:
             for v, (camera, estimate) in enumerate(zip(cameras, estimates)):
                 if estimate is None:
                     continue
-                obs.keypoints[t, v], obs.confidence[t, v] = estimate.keypoints, estimate.score
-                pixels = self._subsample(np.argwhere(estimate.mask)[:, ::-1], M)
-                obs.mask_points[t, v, : len(pixels)], obs.mask_valid[t, v, : len(pixels)] = pixels, True
+                obs.keypoints[t, v] = estimate.keypoints
+                obs.confidence[t, v] = estimate.score
+                pixels = self._subsample(np.argwhere(estimate.mask)[:, ::-1], M)  # (x, y) of glove pixels
+                obs.mask_points[t, v, : len(pixels)] = pixels
+                obs.mask_valid[t, v, : len(pixels)] = True
                 points = self._depth_points(camera, frame.depth[v], estimate.mask)
-                obs.depth_points[t, v, : len(points)], obs.depth_valid[t, v, : len(points)] = points, True
+                obs.depth_points[t, v, : len(points)] = points
+                obs.depth_valid[t, v, : len(points)] = True
         return obs
 
     def _depth_points(self, camera: Camera, depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """World points of the eroded mask interior: depth at the silhouette edge mixes hand and background."""
         size = 2 * self.cfg.erosion_px + 1
-        interior = cv2.erode(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))) > 0
+        disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+        interior = cv2.erode(mask.astype(np.uint8), disk) > 0
         pixels = self._subsample(np.argwhere(interior & (depth > 0))[:, ::-1], self.cfg.depth_points)
-        return camera.backproject(pixels.astype(float), depth[pixels[:, 1], pixels[:, 0]])
+        x, y = pixels[:, 0], pixels[:, 1]
+        return camera.backproject(pixels.astype(float), depth[y, x])
 
     def _initial(self, cameras: list[Camera], evidence: Evidence, side: str, betas: np.ndarray) -> HandParams:
         """Articulation and orientation of the most confident view, translation from the triangulated wrist."""
@@ -147,20 +152,24 @@ class Labeller:
         global_orient, hand_pose, wrist = np.zeros((T, 3)), np.zeros((T, 45)), np.zeros((T, 3))
         projections = np.stack([c.P for c in cameras])
         for t, (_, estimates) in enumerate(evidence):
-            v, best = max(((v, e) for v, e in enumerate(estimates) if e is not None), key=lambda item: item[1].score)
-            orient = Rotation.from_matrix(cameras[v].R).inv() * Rotation.from_rotvec(best.global_orient)  # to world
-            global_orient[t], hand_pose[t] = orient.as_rotvec(), best.hand_pose
-            scores = np.array([[e.score if e is not None else 0.0] for e in estimates])
+            scores = np.array([e.score if e is not None else 0.0 for e in estimates])
+            v = int(np.argmax(scores))
+            best = estimates[v]
+            assert best is not None  # at least two cameras see the hand
+            camera_to_world = Rotation.from_matrix(cameras[v].R).inv()
+            global_orient[t] = (camera_to_world * Rotation.from_rotvec(best.global_orient)).as_rotvec()
+            hand_pose[t] = best.hand_pose
             wrists = np.stack([e.keypoints[:1] if e is not None else np.zeros((1, 2)) for e in estimates])
-            wrist[t] = triangulate(projections, wrists, scores)[0]
+            wrist[t] = triangulate(projections, wrists, scores[:, None])[0]
         return HandParams(global_orient, hand_pose, betas, wrist - self._wrist_at_origin(side, betas))
 
     @torch.no_grad()
     def _wrist_at_origin(self, side: str, betas: np.ndarray) -> np.ndarray:
         """Wrist position at zero translation; for MANO it depends on the shape only."""
-        zeros = torch.zeros(1, 3, device=self.cfg.device)
-        shape = torch.tensor(betas[None], dtype=torch.float32, device=self.cfg.device)
-        _, joints = self.hands[side](zeros, torch.zeros(1, 45, device=self.cfg.device), shape, zeros)
+        device = self.cfg.device
+        zero_rotation, zero_pose, zero_transl = (torch.zeros(1, n, device=device) for n in (3, 45, 3))
+        shape = torch.tensor(betas[None], dtype=torch.float32, device=device)
+        _, joints = self.hands[side](zero_rotation, zero_pose, shape, zero_transl)
         return joints[0, 0].cpu().double().numpy()
 
     def _subsample(self, rows: np.ndarray, count: int) -> np.ndarray:

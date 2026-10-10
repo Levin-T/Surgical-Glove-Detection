@@ -27,12 +27,14 @@ def hand_errors(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]:
 
 def summarise(rows: list[dict[str, Any]]) -> dict[str, float]:
     """Means over the rows (crops), and the area under the 3D-PCK curve (0 to 50 mm) of the per-joint PA errors."""
-    summary = {
-        name: float(np.nanmean([row[name] for row in rows])) for name in ("mpjpe", "root_error", "rr_mpjpe", "pa_mpjpe")
-    }
-    errors = np.array([[row[f"pa_{name}"] for name in JOINT_NAMES] for row in rows]).ravel()
+    summary = {}
+    for name in ("mpjpe", "root_error", "rr_mpjpe", "pa_mpjpe"):
+        summary[name] = float(np.nanmean([row[name] for row in rows]))
+
+    errors = np.array([row[f"pa_{name}"] for row in rows for name in JOINT_NAMES])
     errors = errors[np.isfinite(errors)]
-    summary["pck_auc"] = float(np.mean([(errors <= threshold).mean() for threshold in np.linspace(0, 50, 101)]))
+    pck = [(errors <= threshold).mean() for threshold in np.linspace(0, 50, 101)]  # share of joints within
+    summary["pck_auc"] = float(np.mean(pck))
     summary["crops"] = len(rows)
     return summary
 

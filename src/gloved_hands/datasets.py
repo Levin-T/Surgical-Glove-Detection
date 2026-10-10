@@ -1,4 +1,4 @@
-"""The shards of both arms. Both arms crop, store and count images identically; only the label source differs."""
+"""The crops of both arms. Both arms crop, store and count images identically; only the label source differs."""
 
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,7 +13,7 @@ from gloved_hands.keyframes import Keyframes
 from gloved_hands.labelling import Labels
 from gloved_hands.mano import Mano
 from gloved_hands.recolor import GloveRecolorer, read_rgb
-from gloved_hands.samples import Sample, write_shards
+from gloved_hands.samples import Sample, write_samples
 
 
 class ArmA:
@@ -32,7 +32,8 @@ class ArmA:
         cfg, task = self.cfg, self.cfg.data.held_out_task
         test_subject = sorted({r.subject for r in recordings})[cfg.fold]
         train = [r.session for r in recordings if r.subject != test_subject and r.task != task]
-        val = set(self.rng.choice(train, max(1, round(cfg.data.val_fraction * len(train))), replace=False))
+        n_val = max(1, round(cfg.data.val_fraction * len(train)))
+        val = set(self.rng.choice(train, n_val, replace=False))
         sessions = {
             "train": set(train) - val,
             "val": val,
@@ -45,24 +46,27 @@ class ArmA:
                 f"fold {cfg.fold} has {len(instants['train'])} training images, fewer than "
                 f"data.n_images={cfg.data.n_images}: set data.n_images to the smallest fold's count"
             )
-        pick = np.sort(self.rng.choice(len(instants["train"]), cfg.data.n_images, replace=False))  # read in order
-        instants["train"] = [instants["train"][i] for i in pick]
+        picked = np.sort(self.rng.choice(len(instants["train"]), cfg.data.n_images, replace=False))
+        instants["train"] = [instants["train"][i] for i in picked]
 
-        fold, shards = f"fold{cfg.fold}", Path(cfg.paths.shards)
         by_session = {r.session: r for r in recordings}
+        crops, fold = Path(cfg.paths.crops), f"fold{cfg.fold}"
         counts = {}
-        for split, items in instants.items():  # every split is rewritten, so none keeps samples of an earlier build
-            directory = shards / ("arm_a" if split in ("train", "val") else "test") / fold / split
-            counts[split] = write_shards((self._sample(by_session[h.session], h, row) for h, row in items), directory)
+        for split, items in instants.items():
+            directory = crops / ("arm_a" if split in ("train", "val") else "test") / fold / split
+            samples = (self._sample(by_session[hand.session], hand, row) for hand, row in items)
+            counts[split] = write_samples(samples, directory)
         tested = [r for r in recordings if r.subject == test_subject]
-        counts["keyframes"] = write_shards(self._keyframes(tested, keyframes), shards / "test" / fold / "keyframes")
+        counts["keyframes"] = write_samples(self._keyframes(tested, keyframes), crops / "test" / fold / "keyframes")
         return counts
 
     def _instants(self, labels: list[Labels], sessions: set[str]) -> list[tuple[Labels, int]]:
-        """(labels, row) of the instants of these recordings that passed quality control."""
-        return [
-            (hand, row) for hand in labels if hand.session in sessions for row in np.flatnonzero(hand.passed).tolist()
-        ]
+        """(labels, row) of every instant of these recordings that passed quality control."""
+        instants = []
+        for hand in labels:
+            if hand.session in sessions:
+                instants += [(hand, row) for row in np.flatnonzero(hand.passed).tolist()]
+        return instants
 
     def _sample(self, recording: Recording, labels: Labels, row: int) -> Sample:
         """One random camera of a labelled instant."""
@@ -70,8 +74,8 @@ class ArmA:
         camera, frame, params = recording.cameras[v], int(labels.frames[row]), labels.params
         mano = {"global_orient": params.global_orient[row], "hand_pose": params.hand_pose[row], "betas": params.betas}
         key = f"{recording.session}/{labels.side}/{camera.name}/{frame:06d}"
-        meta = _meta(recording, camera, "rig")
-        return Sample.crop(key, recording[frame].color[v], camera, labels.joints[row], labels.side, meta, mano)
+        image = recording[frame].color[v]
+        return Sample.crop(key, image, camera, labels.joints[row], labels.side, _meta(recording, camera, "rig"), mano)
 
     def _keyframes(self, recordings: list[Recording], keyframes: Keyframes | None) -> Iterator[Sample]:
         """Every camera of every keyframe, with the triangulated human annotation as the reference."""
@@ -104,14 +108,15 @@ class ArmB:
     def build(self) -> dict[str, int]:
         from dex_ycb_toolkit.factory import get_dataset
 
-        data, directory = self.cfg.data, Path(self.cfg.paths.shards) / "arm_b"
+        data, directory = self.cfg.data, Path(self.cfg.paths.crops) / "arm_b"
         n_val = max(1, round(data.val_fraction * data.n_images))
         return {
-            "train": write_shards(self._samples(get_dataset("s1_train"), data.n_images), directory / "train"),
-            "val": write_shards(self._samples(get_dataset("s1_val"), n_val), directory / "val"),
+            "train": write_samples(self._samples(get_dataset("s1_train"), data.n_images), directory / "train"),
+            "val": write_samples(self._samples(get_dataset("s1_val"), n_val), directory / "val"),
         }
 
     def _samples(self, dataset: Any, count: int) -> Iterator[Sample]:
+        """``count`` random frames that show a hand."""
         made = 0
         for index in self.rng.permutation(len(dataset)):
             item = dataset[int(index)]
@@ -125,24 +130,27 @@ class ArmB:
         raise ValueError(f"only {made} labelled DexYCB frames, {count} requested")
 
     def _sample(self, item: dict[str, Any], label: Any) -> Sample:
-        side, pose, file = item["mano_side"], label["pose_m"][0], Path(item["color_file"])
+        side, file = item["mano_side"], Path(item["color_file"])
+        pose = label["pose_m"][0]  # 3 orientation, 45 PCA coefficients, 3 translation
         mean, basis = self.pca[side]
         mano = {
             "global_orient": pose[:3],
             "hand_pose": mean + pose[3:48] @ basis,
             "betas": np.asarray(item["mano_betas"]),
         }
-        with torch.no_grad():  # global_orient, hand_pose, betas, transl
-            batch = [torch.tensor(np.asarray(x)[None], dtype=torch.float32) for x in (*mano.values(), pose[48:51])]
-            joints = self.mano[side](*batch)[1][0].double().numpy()
+        inputs = [mano["global_orient"], mano["hand_pose"], mano["betas"], pose[48:51]]
+        with torch.no_grad():
+            _, joints = self.mano[side](*(torch.tensor(np.asarray(x, np.float32))[None] for x in inputs))
+
         variant = list(self.gloves)[self.rng.integers(len(self.gloves))]
         image = self.gloves[variant](read_rgb(file), label["seg"] == 255, self.rng)  # 255 marks hand pixels
         i = item["intrinsics"]
         K = np.array([[i["fx"], 0, i["ppx"]], [0, i["fy"], i["ppy"]], [0, 0, 1.0]])
+        camera = Camera("dexycb", K, np.eye(3), np.zeros(3))  # DexYCB's poses are in the camera frame
         subject, sequence, serial = file.parts[-4:-1]
         meta = {"source": "dexycb", "subject": subject, "session": sequence, "camera": serial, "glove": variant}
         key = f"dexycb/{subject}/{sequence}/{serial}/{file.stem}"
-        return Sample.crop(key, image, Camera("dexycb", K, np.eye(3), np.zeros(3)), joints, side, meta, mano)
+        return Sample.crop(key, image, camera, joints[0].double().numpy(), side, meta, mano)
 
 
 def _meta(recording: Recording, camera: Camera, source: str) -> dict[str, str]:

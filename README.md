@@ -57,7 +57,7 @@ python -m gloved_hands evaluate fold=0 model=wilor       # zero-shot baselines: 
 
 Notes:
 
-- **Arm sizes.** `data.n_images` is the training set size of both arms. `build-a` fails if a fold has fewer images; in that case, set `data.n_images` to the smallest fold's count and build again. A build replaces the shards it writes.
+- **Arm sizes.** `data.n_images` is the training set size of both arms. `build-a` fails if a fold has fewer images; in that case, set `data.n_images` to the smallest fold's count and build again. A build replaces the crops it writes.
 - **Keyframes.** Set up CVAT as follows:
   1. Create one skeleton per hand. Its label name contains `left` or `right`, and its points are named as in `mano.JOINT_NAMES`.
   2. Upload `keyframes/images/` as a zip, so the paths `<session>/<camera>/<frame>.png` are kept.
@@ -72,19 +72,19 @@ $GLOVED_HANDS_DATA/
   labels/<session>_<side>.npz
   keyframes/images/, keyframes/annotations.json
   gloves/<variant>/<name>.png        the glove alone in the rig, with <name>_mask.png
-  shards/arm_a/fold<k>/{train,val}/
-  shards/arm_b/{train,val}/
-  shards/test/fold<k>/{subject,task,keyframes}/
-  checkpoints/train-<dataset>-s<seed>/   LoRA weights only
+  crops/arm_a/fold<k>/{train,val}/
+  crops/arm_b/{train,val}/
+  crops/test/fold<k>/{subject,task,keyframes}/
+  checkpoints/train-<arm>-s<seed>.pt LoRA adapters only
   results/                           CSVs of validate and evaluate, and evaluate's summary.json
   models/
 ```
 
-Shards are webdataset tars of 100 crops of 256 × 256 pixels. Labels are stored in each crop's camera frame. Left hands are stored mirrored, as right hands.
+Each crop is one `.npz` file holding a 256 × 256 image with its labels. Labels are stored in each crop's camera frame. Left hands are stored mirrored, as right hands.
 
 ## wandb
 
-Only `train` uses wandb: it logs the losses, `val/pa_mpjpe` and the config, so a run can be followed from a phone. Checkpoints, labels, shards and results stay local. Set `wandb.mode=offline` on a machine without internet and upload later with `wandb sync`, or `wandb.mode=disabled` to turn it off.
+Only `train` uses wandb: it logs the losses, `val/pa_mpjpe` and the config, so a run can be followed from a phone. Checkpoints, labels, crops and results stay local. Set `wandb.mode=offline` on a machine without internet and upload later with `wandb sync`, or `wandb.mode=disabled` to turn it off.
 
 ## Development
 

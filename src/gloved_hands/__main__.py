@@ -3,8 +3,8 @@
 label       session=<id>                   MANO labels of both hands of a recording
 keyframes   session=<id>                   images of labelled frames to annotate in CVAT
 validate    session=<id>                   validation layers of the labels (RQ2)
-build-a     fold=<k>                       Arm A shards of one fold, and the fold's test sets
-build-b                                    Arm B shards (recoloured DexYCB)
+build-a     fold=<k>                       Arm A crops of one fold, and the fold's test sets
+build-b                                    Arm B crops (recoloured DexYCB)
 train       arm=<a|b> fold=<k> seed=<s>    WiLoR + LoRA on one arm (Arm B ignores the fold)
 evaluate    fold=<k> adapter=<checkpoint>  a trained model on the fold's test sets (RQ1)
 evaluate    fold=<k> model=<wilor|hamer>   a zero-shot baseline on the same test sets
@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pytorch_lightning as pl
+import torch
+import wandb
 from torch.utils.data import DataLoader
 
 from gloved_hands.capture import Recording
@@ -31,7 +32,7 @@ from gloved_hands.keyframes import Keyframes
 from gloved_hands.labelling import Labeller, Labels
 from gloved_hands.metrics import summarise
 from gloved_hands.model import HandPoseModel
-from gloved_hands.samples import random_example, read_shards, to_example
+from gloved_hands.samples import SampleFolder, random_example, to_example
 from gloved_hands.validation import LabelValidator
 
 
@@ -54,7 +55,8 @@ def keyframes(cfg: Config) -> None:
     for side in cfg.fit.sides:
         labels = Labels.load(_labels_path(cfg, recording.session, side))
         passed = labels.frames[labels.passed]
-        frames |= set(rng.choice(passed, min(cfg.data.keyframes_per_session, len(passed)), replace=False).tolist())
+        count = min(cfg.data.keyframes_per_session, len(passed))
+        frames |= set(rng.choice(passed, count, replace=False).tolist())
     Keyframes.export(recording, sorted(frames), Path(cfg.paths.keyframes) / "images")
 
 
@@ -91,44 +93,31 @@ def build_b(cfg: Config) -> None:
 def train(cfg: Config) -> None:
     """Both arms: same model, number of images, augmentation, optimiser, schedule and early stopping.
     Only the training curves go to wandb; the checkpoints stay local."""
-    pl.seed_everything(cfg.seed, workers=True)
+    torch.manual_seed(cfg.seed)
     t = cfg.train
     if cfg.arm == "a":
-        data, dataset = Path(cfg.paths.shards) / "arm_a" / f"fold{cfg.fold}", f"arm-a-f{cfg.fold}"
+        data, name = Path(cfg.paths.crops) / "arm_a" / f"fold{cfg.fold}", f"train-arm-a-f{cfg.fold}-s{cfg.seed}"
     else:  # Arm B does not depend on the fold: trained once per seed, tested on every fold
-        data, dataset = Path(cfg.paths.shards) / "arm_b", "arm-b"
-    name = f"train-{dataset}-s{cfg.seed}"
+        data, name = Path(cfg.paths.crops) / "arm_b", f"train-arm-b-s{cfg.seed}"
     augment = partial(random_example, rotation_deg=t.rotation_deg, scale_jitter=t.scale_jitter)
-    train_loader = DataLoader(
-        read_shards(data / "train", shuffle=True).map(augment), batch_size=t.batch_size, num_workers=t.workers
-    )
-    val_loader = DataLoader(read_shards(data / "val").map(to_example), batch_size=t.batch_size, num_workers=t.workers)
-    logger = pl.loggers.WandbLogger(name=name, project=cfg.wandb.project, mode=cfg.wandb.mode, config=asdict(cfg))
-    callbacks = [
-        pl.callbacks.ModelCheckpoint(
-            Path(cfg.paths.checkpoints) / name, monitor="val/pa_mpjpe", save_weights_only=True
-        ),
-        pl.callbacks.EarlyStopping("val/pa_mpjpe", patience=t.patience),
-    ]
-    trainer = pl.Trainer(
-        max_steps=t.max_steps,
-        val_check_interval=t.val_every,
-        check_val_every_n_epoch=None,
-        precision=t.precision,  # type: ignore[arg-type]
-        logger=logger,
-        callbacks=callbacks,
-    )
-    trainer.fit(HandPoseModel(t, cfg.paths), train_loader, val_loader)
+    train_data, val_data = SampleFolder(data / "train", augment), SampleFolder(data / "val", to_example)
+    train_loader = DataLoader(train_data, t.batch_size, shuffle=True, num_workers=t.workers, drop_last=True)
+    val_loader = DataLoader(val_data, t.batch_size, num_workers=t.workers)
+    checkpoint = Path(cfg.paths.checkpoints) / f"{name}.pt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    run = wandb.init(project=cfg.wandb.project, mode=cfg.wandb.mode, name=name, config=asdict(cfg))  # type: ignore[arg-type]
+    HandPoseModel(t, cfg.paths).fit(train_loader, val_loader, checkpoint, run)
+    run.finish()
 
 
 def evaluate(cfg: Config) -> None:
     """Per-crop errors (<test set>.csv) and their summary (summary.json) for each test set of the fold."""
     evaluator = Evaluator(cfg)
-    name = Path(cfg.adapter).parent.name if cfg.adapter else f"zero-shot-{cfg.model}"
+    name = Path(cfg.adapter).stem if cfg.adapter else f"zero-shot-{cfg.model}"
     directory = Path(cfg.paths.results) / f"evaluate-{name}-f{cfg.fold}"
     directory.mkdir(parents=True, exist_ok=True)
     summaries = {}
-    for test_set in sorted((Path(cfg.paths.shards) / "test" / f"fold{cfg.fold}").iterdir()):
+    for test_set in sorted((Path(cfg.paths.crops) / "test" / f"fold{cfg.fold}").iterdir()):
         rows = evaluator.evaluate(test_set)
         if rows:
             _write_csv(rows, directory / f"{test_set.name}.csv")

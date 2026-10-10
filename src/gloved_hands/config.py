@@ -14,10 +14,10 @@ class PathsConfig:
     data: str = "${oc.env:GLOVED_HANDS_DATA,/data/gloved-hands}"
     recordings: str = "${paths.data}/recordings"  # root passed to Recording(root, session)
     labels: str = "${paths.data}/labels"
-    shards: str = "${paths.data}/shards"
+    crops: str = "${paths.data}/crops"
     keyframes: str = "${paths.data}/keyframes"  # images/ to annotate, annotations.json from CVAT
     gloves: str = "${paths.data}/gloves"  # <variant>/<name>.png + <name>_mask.png: the glove alone, in the rig
-    checkpoints: str = "${paths.data}/checkpoints"
+    checkpoints: str = "${paths.data}/checkpoints"  # trained LoRA adapters
     results: str = "${paths.data}/results"  # CSV and JSON written by validate and evaluate
     mano: str = "${paths.data}/models/mano"  # MANO_RIGHT.pkl, MANO_LEFT.pkl
     mano_mean_params: str = "${paths.data}/models/mano/mano_mean_params.npz"  # ships with WiLoR and HaMeR
@@ -83,7 +83,7 @@ class TrainConfig:
     rotation_deg: float = 30.0
     scale_jitter: float = 0.15
     workers: int = 6
-    precision: str = "bf16-mixed"
+    bf16: bool = True  # mixed precision
 
 
 @dataclass

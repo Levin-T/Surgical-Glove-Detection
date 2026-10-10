@@ -55,5 +55,6 @@ class Keyframes:
                 continue
             points = np.stack([per_camera[camera.name] for camera in cameras])
             seen = np.isfinite(points).all(-1).astype(float)
-            result[(frame, side)] = triangulate(np.stack([camera.P for camera in cameras]), np.nan_to_num(points), seen)
+            projections = np.stack([camera.P for camera in cameras])
+            result[(frame, side)] = triangulate(projections, np.nan_to_num(points), seen)
         return result

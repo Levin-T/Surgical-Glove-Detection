@@ -23,21 +23,20 @@ class LabelValidator:
         fitter = MultiViewFitter(self.labeller.hands[labels.side], recording.cameras, cfg)
         passed = labels.frames[labels.passed]
         rows = []
-        for start in np.unique(np.linspace(0, max(len(passed) - cfg.chunk_size, 0), cfg.lovo_chunks).astype(int)):
-            observed = self.labeller.observe(
-                recording, passed[start : start + cfg.chunk_size], labels.side, labels.params
-            )
+        starts = np.linspace(0, max(len(passed) - cfg.chunk_size, 0), cfg.lovo_chunks).astype(int)
+        for start in np.unique(starts):  # evenly spaced chunks
+            chunk = passed[start : start + cfg.chunk_size]
+            observed = self.labeller.observe(recording, chunk, labels.side, labels.params)
             if observed is None:
                 continue
             frames, obs, init = observed
             for v, camera in enumerate(recording.cameras):
                 result = fitter.fit(obs.without_view(v), init, fit_shape=False)
-                error = np.linalg.norm(camera.project(result.joints) - obs.keypoints[:, v], axis=-1).mean(-1)
-                rows += [
-                    {"frame": int(frame), "camera": camera.name, "error_px": float(e)}
-                    for frame, e, seen in zip(frames, error, obs.confidence[:, v] > 0)
-                    if seen
-                ]
+                pixels = camera.project(result.joints)  # (T, 21, 2)
+                errors = np.linalg.norm(pixels - obs.keypoints[:, v], axis=-1).mean(-1)
+                for frame, error, confidence in zip(frames, errors, obs.confidence[:, v]):
+                    if confidence > 0:  # this camera saw the hand
+                        rows.append({"frame": int(frame), "camera": camera.name, "error_px": float(error)})
         return rows
 
     @staticmethod
@@ -60,5 +59,6 @@ class LabelValidator:
             reference = recording[frame].manus.get(labels.side)
             if reference is not None:
                 errors = hand_errors(labels.joints[row], reference)
-                rows.append({"frame": frame, **{name: e for name, e in errors.items() if name.startswith("pa_")}})
+                articulation = {name: value for name, value in errors.items() if name.startswith("pa_")}
+                rows.append({"frame": frame, **articulation})
         return rows
