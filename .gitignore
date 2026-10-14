@@ -93,3 +93,15 @@ coverage.xml
 .Trashes
 ehthumbs.db
 Thumbs.db
+# ==========================================
+# Project data, models and run outputs
+# ==========================================
+# Raw sessions, exported labels and keyframes
+data/
+# Model files (MANO is licensed and must not be committed; detector/keypoint weights)
+models/
+# Run outputs, logs and checkpoints
+outputs/*
+!outputs/.gitkeep
+# wandb local run files
+wandb/
