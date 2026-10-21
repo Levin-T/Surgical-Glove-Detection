@@ -4,7 +4,7 @@ import cv2
 import time
 
 def setup_synchronized_cameras():
-    # 1. Initialize context to find connected devices
+    # 1. Ingititialize context to find connected devices
     context = rs.context()
     devices = context.query_devices()
     
