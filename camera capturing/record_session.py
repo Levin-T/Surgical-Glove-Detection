@@ -12,7 +12,9 @@ Layout (what labeling/run.py reads):
   data/raw/<session>/timestamps.csv   frame, then one hardware timestamp per camera
 cam0 is the lowest serial. calibration.json (R, t) comes from the calibration project.
 
-python "camera capturing/record_session.py" <session>      stop with Ctrl+C
+python "camera capturing/record_session.py" <session>             until Ctrl+C
+python "camera capturing/record_session.py" <session> <seconds>   stops after that long (0 = one frame)
+A countdown runs before recording starts, and the terminal beeps at start and stop.
 """
 
 import json
@@ -28,6 +30,8 @@ import pyrealsense2 as rs
 from capture_test import (COLOR_HEIGHT, COLOR_WIDTH, DEPTH_HEIGHT, DEPTH_WIDTH, DISPARITY_SHIFT,
                           FPS, MASTER, MAX_JITTER_MS, ROOT, SERIALS, SLAVE, WARMUP_S, configure,
                           enable_advanced_mode, set_disparity_shift)
+
+COUNTDOWN_S = 5  # time for the subject to get into position
 
 
 class ImageWriter:
@@ -115,14 +119,24 @@ class SessionRecorder:
         with open(self.folder / "meta.json", "w") as f:
             json.dump(meta, f, indent=2)
 
-    def record(self):
+    def countdown(self):
+        for second in range(COUNTDOWN_S, 0, -1):
+            print(f"Starting in {second}")
+            time.sleep(1)
+
+    def record(self, seconds=None):
+        max_frames = None if seconds is None else max(1, round(seconds * FPS))
         frame, skipped = 0, 0
-        started = time.time()
+        self.countdown()
         with open(self.folder / "timestamps.csv", "w") as stamps:
             stamps.write("frame," + ",".join(f"cam{k}" for k in range(len(self.cameras))) + "\n")
-            print("Recording, press Ctrl+C to stop")
+            for pipe in self.pipelines.values():  # drop frames that queued up during the countdown
+                while pipe.poll_for_frames():
+                    pass
+            print("\aRecording" + (f" for {seconds:g} s" if seconds else ", press Ctrl+C to stop"))
+            started = time.time()
             try:
-                while True:
+                while max_frames is None or frame < max_frames:
                     framesets = {sn: self.pipelines[sn].wait_for_frames(5000) for sn in self.cameras}
                     times = [framesets[sn].get_color_frame().get_timestamp() for sn in self.cameras]
                     if max(times) - min(times) > MAX_JITTER_MS:
@@ -136,12 +150,14 @@ class SessionRecorder:
                         self.writer.write(self.folder / f"cam{k}" / "depth" / f"{frame:06d}.png", depth)
                     stamps.write(f"{frame}," + ",".join(f"{t:.3f}" for t in times) + "\n")
                     frame += 1
-                    if frame % (FPS * 5) == 0:
-                        print(f"  {frame} frames, {frame / (time.time() - started):.1f} fps, "
-                              f"{skipped} skipped, {self.writer.jobs.qsize()} images waiting")
+                    if frame % FPS == 0:
+                        elapsed = time.time() - started
+                        total = f" / {seconds:g}" if seconds else ""
+                        print(f"\r  {elapsed:5.0f}{total} s  {frame} frames  {frame / elapsed:4.1f} fps  "
+                              f"{skipped} skipped  {self.writer.jobs.qsize()} waiting   ", end="", flush=True)
             except KeyboardInterrupt:
                 pass
-        print(f"Stopped: {frame} frames, {skipped} skipped for jitter")
+        print(f"\n\aStopped: {frame} frames ({frame / FPS:.1f} s), {skipped} skipped for jitter")
 
     def stop(self):
         for pipe in self.pipelines.values():
@@ -155,6 +171,6 @@ if __name__ == "__main__":
     recorder = SessionRecorder(sys.argv[1])
     try:
         recorder.start()
-        recorder.record()
+        recorder.record(float(sys.argv[2]) if len(sys.argv) > 2 else None)
     finally:
         recorder.stop()
