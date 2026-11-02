@@ -36,7 +36,7 @@ from common.camera import Camera  # noqa: E402
 from labeling.triangulate import Triangulator  # noqa: E402
 
 SHOTS = 12
-INTERVAL_S = 4  # time to move the board between shots
+INTERVAL_S = 6  # time to move the board between shots
 GOOD_PX, OK_PX = 1.0, 2.0  # reprojection error per camera
 GOOD_MM, OK_MM = 1.0, 2.0  # error of the triangulated square edges
 
